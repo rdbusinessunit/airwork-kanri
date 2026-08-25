@@ -5,16 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>求人広告 運用ダッシュボード</title>
 
-<!-- React / ReactDOM -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- React / ReactDOM (このリポジトリに同梱。外部CDNには依存しません) -->
+<script src="./vendor/react.production.min.js"></script>
+<script src="./vendor/react-dom.production.min.js"></script>
 <!-- Babel (JSXをブラウザ上でそのまま実行するため) -->
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="./vendor/babel.min.js"></script>
 <!-- CSVパース -->
-<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="./vendor/papaparse.min.js"></script>
 <!-- グラフ (Recharts はPropTypes / D3系ライブラリに依存) -->
-<script src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
-<script src="https://unpkg.com/recharts@2/umd/Recharts.js"></script>
+<script src="./vendor/prop-types.min.js"></script>
+<script src="./vendor/recharts.js"></script>
 
 <style>
   html, body { margin: 0; background: #EEF1EE; }
@@ -771,7 +771,7 @@ root.render(<JobAdDashboard />);
   --jad-border: #DADFD9; --jad-navy: #274A52; --jad-navy-soft: #E5ECEB; --jad-gold: #B5842C;
   --jad-brick: #A8432B; --jad-brick-soft: #F3E3DE; --jad-good: #3F7A5C; --jad-good-soft: #E3EFE8;
 }
-@import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700&family=Noto+Sans+JP:wght@400;500;600&family=Roboto+Mono:wght@500&display=swap');
+/* 外部フォント(Google Fonts)への依存をなくし、OS標準フォントを使用しています */
 body { font-family: 'Noto Sans JP', sans-serif; color: var(--jad-ink); }
 .jad-root * { box-sizing: border-box; }
 .jad-spin { animation: jad-spin 1s linear infinite; }

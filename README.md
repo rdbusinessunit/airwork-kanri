@@ -17,7 +17,11 @@
 ## 1. GitHubへのアップロード方法
 
 1. GitHubで新しいリポジトリを作成します(例: `job-ad-dashboard`)
-2. `index.html` をリポジトリにアップロードします(「Add file」→「Upload files」)
+2. `index.html` と `vendor` フォルダ(中に6つの.jsファイルが入っています)を、
+   **フォルダ構造を保ったまま**リポジトリにアップロードします
+   - 「Add file」→「Upload files」で、`index.html`と`vendor`フォルダごとドラッグ&ドロップすると、
+     フォルダ構造を保ったままアップロードできます
+   - `vendor`フォルダの中身が`index.html`と同じ階層の`vendor/`に入っている状態が正解です
 
 ## 2. GitHub Pagesを有効にする
 
@@ -52,8 +56,8 @@ Disallow: /
 
 ## 5. 技術メモ
 
-- React・Recharts・PapaParseはCDN(unpkg)から読み込みます。**インターネット接続が必要**です
-- データの保存・読み込みはSupabaseのREST API(PostgREST)を直接呼び出しています
-- テーブルの行レベルセキュリティ(RLS)は「公開キーからの全操作を許可」に設定しています。
-  URLとキーを知っている人は誰でもデータを読み書きできる、社内共有ツールとしての想定です
+- React・Recharts・PapaParseなど必要なライブラリは、すべて`vendor`フォルダにファイルとして同梱しています。
+  外部CDN(unpkgなど)には一切アクセスしないため、**社内ネットワークの通信制限があっても問題なく動作**します
+- データの保存・読み込みだけはSupabaseのREST API(PostgREST)を直接呼び出すため、
+  Supabaseの通信(`*.supabase.co`)は許可されている必要があります
 
