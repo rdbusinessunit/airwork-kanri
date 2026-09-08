@@ -56,6 +56,29 @@ async function sbFetch(path, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+/* 失敗の理由を日本語にする。「失敗しました」だけだと、接続先が落ちているのか
+   設定の問題なのか切り分けられず、原因を探すのに時間がかかるため。 */
+function describeError(e) {
+  const msg = String((e && e.message) || e);
+  if (/Failed to fetch|NetworkError|ERR_NAME_NOT_RESOLVED|Load failed/i.test(msg)) {
+    return "Supabaseに接続できません。プロジェクトが一時停止している可能性があります"
+         + "(無料プランは一定期間アクセスがないと自動で停止します)。"
+         + "Supabaseのダッシュボードを開き、一時停止中なら再開ボタン"
+         + "(日本語表示では「履歴書プロジェクト」と誤訳されています)を押してください。";
+  }
+  const m = msg.match(/Supabase error (\d{3})/);
+  if (m) {
+    const code = m[1];
+    if (code === "401" || code === "403") return `Supabaseに接続を拒否されました(${code})。接続キーかテーブルのポリシー設定を確認してください。`;
+    if (code === "404") return `jobsテーブルが見つかりません(404)。setup.sql を実行してください。`;
+    if (code === "413") return `一度に送るデータが大きすぎます(413)。`;
+    if (code === "429") return `リクエストが多すぎます(429)。少し待ってからやり直してください。`;
+    if (code.charAt(0) === "5") return `Supabase側でエラーが起きています(${code})。少し待ってからやり直してください。`;
+    return `Supabaseがエラーを返しました(${code})。`;
+  }
+  return msg;
+}
+
 /* ==================================================================
    React / ライブラリ参照
 ================================================================== */
@@ -441,11 +464,16 @@ async function saveJobs(jobList) {
   for (let i = 0; i < jobList.length; i += CHUNK) {
     const payload = jobList.slice(i, i + CHUNK).filter(Boolean).map(jobPayload);
     if (!payload.length) continue;
-    await sbFetch("jobs", {
-      method: "POST",
-      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify(payload),
-    });
+    try {
+      await sbFetch("jobs", {
+        method: "POST",
+        headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      /* どこまで保存できたかが分かるようにしてから投げ直す */
+      throw new Error(`${jobList.length}件中${i}件を保存した時点で中断しました。${e.message}`);
+    }
   }
 }
 async function deleteJobStorage(jobId) {
@@ -462,6 +490,7 @@ async function deleteJobStorage(jobId) {
 function JobAdDashboard() {
   const [jobs, setJobs] = useState({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [busyBranch, setBusyBranch] = useState(null);
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [toast, setToast] = useState(null);
@@ -474,6 +503,7 @@ function JobAdDashboard() {
   const [impFilter, setImpFilter] = useState("all");
   const fileInputs = useRef({});
   const backupInputRef = useRef(null);
+  const toastTimer = useRef(null);
   /* 取り込み中に最新のjobsを同期的に読むための控え */
   const jobsRef = useRef({});
 
@@ -484,8 +514,9 @@ function JobAdDashboard() {
       try {
         const loaded = await loadAllJobs();
         setJobs(loaded);
+        setLoadError(null);
       } catch (e) {
-        showToast("データの読み込みに失敗しました", "error");
+        setLoadError(describeError(e));
       } finally {
         setLoading(false);
       }
@@ -494,7 +525,9 @@ function JobAdDashboard() {
 
   function showToast(msg, kind = "ok") {
     setToast({ msg, kind });
-    setTimeout(() => setToast(null), 3400);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    /* エラーは読む時間が要るので長めに出す */
+    toastTimer.current = setTimeout(() => setToast(null), kind === "error" ? 14000 : 3400);
   }
 
   const reminder = useMemo(() => nextReminder(), []);
@@ -507,13 +540,22 @@ function JobAdDashboard() {
     let totalRows = 0, newJobs = 0, revisedJobs = 0, skippedRows = 0;
     const branchCounts = {};
     const mismatched = [];
+    /* 保存に失敗した場合、成功メッセージを出してはいけない
+       (保存されていないのに保存できたと誤解させてしまうため) */
+    let saveError = null;
 
     for (const file of files) {
       const period = extractPeriod(file.name);
       const snapshotDate = period.date;
       try {
-        const text = await readCsvText(file);
-        const rows = Papa.parse(text, { header: true, skipEmptyLines: true }).data;
+        let text, rows;
+        try {
+          text = await readCsvText(file);
+          rows = Papa.parse(text, { header: true, skipEmptyLines: true }).data;
+        } catch (e) {
+          showToast(`${file.name} を読み込めませんでした。CSVの形式を確認してください。`, "error");
+          continue;
+        }
         /* ボタンを押し間違えても列名から媒体を判定して正しく取り込む */
         const fileSource = detectSource(rows[0]) || sourceId;
         if (fileSource !== sourceId) mismatched.push(SOURCE_BY_ID[fileSource].label);
@@ -569,11 +611,16 @@ function JobAdDashboard() {
         setJobs(next);
         await saveJobs(touched);
       } catch (e) {
-        showToast(`${file.name} の読み込みに失敗しました`, "error");
+        /* 画面には反映済みなので、保存だけが失敗したことが分かる文言にする */
+        saveError = `画面には反映しましたが、Supabaseへの保存に失敗しました。再読み込みすると取り込んだ内容は消えます。${describeError(e)}`;
       }
     }
 
     setBusyBranch(null);
+    if (saveError) {
+      showToast(saveError, "error");
+      return;
+    }
     setLastImport((prev) => ({ ...prev, [`${sourceId}:${branchId}`]: { date: todayStr(), count: totalRows } }));
     if (totalRows) {
       const label = mismatched.length ? mismatched[0] : SOURCE_BY_ID[sourceId].label;
@@ -755,7 +802,7 @@ function JobAdDashboard() {
           return (
             <div key={key} className="jad-branch-card">
               <div className="jad-branch-name">{b.label}</div>
-              <button className="jad-import-btn" disabled={busyBranch === key} onClick={() => fileInputs.current[key]?.click()}>
+              <button className="jad-import-btn" disabled={busyBranch === key || !!loadError} onClick={() => fileInputs.current[key]?.click()}>
                 {busyBranch === key ? <Loader2 size={16} className="jad-spin" /> : <Upload size={16} />}
                 CSVを取り込む
               </button>
@@ -799,6 +846,17 @@ function JobAdDashboard() {
 
       {loading ? (
         <div className="jad-empty"><Loader2 size={20} className="jad-spin" /> 読み込み中…</div>
+      ) : loadError ? (
+        <div className="jad-load-error">
+          <div className="jad-load-error-head"><AlertTriangle size={16} /> データを読み込めませんでした</div>
+          <p>{loadError}</p>
+          <p className="jad-load-error-note">
+            原因が解消するまで取り込みボタンは押せません。既存のデータを空の状態で上書きしてしまわないためです。
+          </p>
+          <button className="jad-primary-btn" onClick={() => window.location.reload()}>
+            <RotateCcw size={14} /> 再読み込み
+          </button>
+        </div>
       ) : ranked.length === 0 ? (
         <div className="jad-empty">
           {searchText.trim()
@@ -1145,7 +1203,11 @@ body { font-family: 'Noto Sans JP', sans-serif; color: var(--jad-ink); }
 
 .jad-panel-footer { border-top: 1px solid var(--jad-border); padding-top: 14px; margin-top: 4px; }
 
-.jad-toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--jad-ink); color: #fff; padding: 10px 18px; border-radius: 24px; font-size: 12.5px; z-index: 60; box-shadow: 0 6px 18px rgba(0,0,0,0.2); }
+.jad-load-error { background: var(--jad-surface); border: 1px solid var(--jad-brick); border-left-width: 3px; border-radius: 8px; padding: 18px 20px; }
+.jad-load-error-head { display: flex; align-items: center; gap: 7px; color: var(--jad-brick); font-weight: 700; font-size: 13.5px; margin-bottom: 10px; }
+.jad-load-error p { margin: 0 0 10px; font-size: 12.5px; line-height: 1.9; color: var(--jad-ink); }
+.jad-load-error-note { color: var(--jad-ink-soft) !important; font-size: 11.5px !important; }
+.jad-toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--jad-ink); color: #fff; padding: 10px 18px; border-radius: 24px; font-size: 12.5px; z-index: 60; box-shadow: 0 6px 18px rgba(0,0,0,0.2); max-width: min(720px, calc(100vw - 40px)); text-align: center; line-height: 1.8; }
 .jad-toast.error { background: var(--jad-brick); }
 </style>
 </body>
