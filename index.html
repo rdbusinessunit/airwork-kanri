@@ -373,8 +373,31 @@ function deriveJobMetrics(job, today = new Date()) {
   return { snapDates, latest, latestDate, lastRevision, elapsedDays, clicksPerDaySinceRevision, preAvgClicksPerDay, postAvgClicksPerDay, changePct };
 }
 
+/* Supabase(PostgREST)は1回のGETで最大1000件しか返さない。
+   ページングしないと、それを超えた分が画面に出てこない。 */
+async function fetchAllJobRows() {
+  const PAGE = 1000;
+  const rows = [];
+  for (let from = 0; ; from += PAGE) {
+    let page;
+    try {
+      page = await sbFetch("jobs?select=*&order=job_id", {
+        headers: { "Range-Unit": "items", "Range": `${from}-${from + PAGE - 1}` },
+      });
+    } catch (e) {
+      /* 総件数がちょうどPAGEの倍数だと、最後に範囲外を要求して416が返る */
+      if (String(e.message).includes("416")) break;
+      throw e;
+    }
+    const list = page || [];
+    rows.push(...list);
+    if (list.length < PAGE) break;
+  }
+  return rows;
+}
+
 async function loadAllJobs() {
-  const rows = await sbFetch("jobs?select=*");
+  const rows = await fetchAllJobRows();
   const jobs = {};
   (rows || []).forEach((r) => {
     jobs[r.job_id] = {
