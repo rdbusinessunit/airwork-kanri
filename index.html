@@ -125,16 +125,45 @@ const UploadCloud = mkIcon(<>
    定数・ユーティリティ (Claudeアーティファクト版と同じロジック)
 ================================================================== */
 
-const BRANCHES = [
-  { id: "plus-i", label: "plus-i" },
-  { id: "plus-c", label: "plus-c" },
-  { id: "next", label: "next" },
-  { id: "up", label: "up" },
+/* 媒体(ソース)定義。
+   媒体は job_id の接頭辞で判別する(Supabaseのテーブル定義は変更不要)。
+   - エアワーク: 求人番号をそのまま job_id に使う(既存データとの互換のため接頭辞なし)
+   - 求人ボックス: "kb:" を付けて求人番号の衝突を防ぐ */
+const SOURCES = [
+  {
+    id: "airwork",
+    label: "エアワーク",
+    fileHint: "「求人ごとの配信実績」CSV",
+    branches: [
+      { id: "plus-i", label: "plus-i" },
+      { id: "plus-c", label: "plus-c" },
+      { id: "next", label: "next" },
+      { id: "up", label: "up" },
+    ],
+  },
+  {
+    id: "kyujinbox",
+    label: "求人BOX",
+    fileHint: "「求人別」レポートCSV",
+    branches: [
+      { id: "plus", label: "plus" },
+      { id: "next", label: "next" },
+      { id: "up", label: "up" },
+    ],
+  },
 ];
+const SOURCE_BY_ID = {};
+SOURCES.forEach((s) => { SOURCE_BY_ID[s.id] = s; });
+
+function sourceOf(jobId) { return String(jobId).startsWith("kb:") ? "kyujinbox" : "airwork"; }
+function branchesOf(sourceId) { return (SOURCE_BY_ID[sourceId] || SOURCES[0]).branches; }
+/* 画面に出す求人番号(kb: を外した元のID) */
+function displayJobId(jobId) { return String(jobId).replace(/^kb:/, ""); }
 
 const REMINDER_DAYS = [10, 20, 30];
 
-const COL_MAP = {
+/* エアワーク「求人ごとの配信実績」CSVの列名 */
+const AW_COL_MAP = {
   "表示数": "impressions",
   "クリック率": "ctr",
   "クリック数": "clicks",
@@ -147,6 +176,20 @@ const COL_MAP = {
   "応募開始単価": "costPerApplyStart",
   "応募単価": "costPerApply",
   "利用済予算": "budgetUsed",
+};
+
+/* 求人ボックス「求人別」レポートCSVの列名。
+   応募開始数・応募完了率にあたる指標は求人ボックス側に存在しない。 */
+const KB_COL_MAP = {
+  "表示回数": "impressions",
+  "クリック数": "clicks",
+  "クリック率": "ctr",
+  "平均クリック単価": "cpc",
+  "費用": "budgetUsed",
+  "応募数": "applies",
+  "アクション数": "actions",
+  "応募率": "applyRate",
+  "応募単価": "costPerApply",
 };
 
 function cleanNum(v) {
@@ -162,10 +205,48 @@ function fmtPct(n) {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return n.toFixed(2) + "%";
 }
-function extractSnapshotDate(filename) {
-  const m = filename.match(/(\d{4})(\d{2})(\d{2})_\d{6}\.csv$/i);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-  return todayStr();
+/* ファイル名から取り込み日(スナップショット日)を割り出す。
+   エアワーク  : ..._YYYYMMDD_HHMMSS.csv   → 出力日
+   求人ボックス: ..._YYYYMMDD_YYYYMMDD.csv → 集計期間の開始日と終了日 */
+function extractPeriod(filename) {
+  const kb = filename.match(/_(\d{4})(\d{2})(\d{2})_(\d{4})(\d{2})(\d{2})\.csv$/i);
+  if (kb) return { start: `${kb[1]}-${kb[2]}-${kb[3]}`, date: `${kb[4]}-${kb[5]}-${kb[6]}` };
+  const aw = filename.match(/(\d{4})(\d{2})(\d{2})_\d{6}\.csv$/i);
+  if (aw) return { start: null, date: `${aw[1]}-${aw[2]}-${aw[3]}` };
+  return { start: null, date: todayStr() };
+}
+
+/* エアワークはUTF-8(BOM付き)、求人ボックスはShift_JISで出力されるため、
+   バイト列を見て文字コードを判定してから読む。 */
+async function readCsvText(file) {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder("utf-8").decode(buf);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch (e) {
+    return new TextDecoder("shift_jis").decode(buf);
+  }
+}
+
+/* 押したボタンの拠点を、実際に取り込む媒体の拠点に読み替える。
+   例: エアワークの「plus-i」ボタンに求人BOXのCSVを入れた場合は「plus」にする。
+   そのままだとタブに存在しない拠点が生まれ、求人が一覧から消えてしまう。 */
+function resolveBranch(sourceId, branchId) {
+  const branches = branchesOf(sourceId);
+  if (branches.some((b) => b.id === branchId)) return branchId;
+  const near = branches.find((b) => branchId.startsWith(b.id) || b.id.startsWith(branchId));
+  return (near || branches[0]).id;
+}
+
+/* ヘッダーの列名から媒体を判定する(ボタンを押し間違えても正しく取り込めるように) */
+function detectSource(row) {
+  if (!row) return null;
+  if ("求人タイトル" in row || "表示回数" in row) return "kyujinbox";
+  if ("求人内容" in row || "表示数" in row) return "airwork";
+  return null;
 }
 function extractCompany(memo) {
   if (!memo) return "";
@@ -173,6 +254,57 @@ function extractCompany(memo) {
   if (tokens.length === 0) return "";
   if (tokens.length === 1) return tokens[0];
   return /^\d+$/.test(tokens[0]) ? (tokens[1] || tokens[0]) : tokens[0];
+}
+
+/* CSVの1行を共通の形に変換する。
+   null を返した行は無視、"skip" を返した行は「意図的に取り込まない行」。 */
+function parseAirworkRow(row, fallbackBranch) {
+  const id = row["求人番号"];
+  if (!id || String(id).trim() === "合計") return null;
+  const stats = {};
+  Object.entries(AW_COL_MAP).forEach(([jp, key]) => { stats[key] = cleanNum(row[jp]); });
+  const memo = (row["求人メモ"] || "").trim();
+  return {
+    jobId: String(id).trim(),
+    branch: fallbackBranch,
+    title: (row["求人内容"] || "").trim(),
+    memo,
+    company: extractCompany(memo),
+    employmentType: (row["雇用形態"] || "").trim(),
+    stats,
+  };
+}
+
+/* 求人ボックスのCSVは plus / next / up が1ファイルにまとまって出力されるため、
+   「勤務先名」から拠点を振り分ける。判定できない行だけボタンで選んだ拠点に入れる。 */
+function kbBranch(workplaceName, fallbackBranch) {
+  const s = workplaceName || "";
+  if (s.includes("next")) return "next";
+  if (s.includes("up")) return "up";
+  if (s.includes("plus")) return "plus";
+  return fallbackBranch;
+}
+function parseKyujinboxRow(row, fallbackBranch) {
+  const id = row["求人番号"];
+  if (!id || String(id).trim() === "合計") return null;
+  const status = (row["ステータス"] || "").trim();
+  if (status === "募集停止") return "skip";
+  const stats = {};
+  Object.entries(KB_COL_MAP).forEach(([jp, key]) => { stats[key] = cleanNum(row[jp]); });
+  const workplace = (row["勤務先名"] || "").trim();
+  const memo = [(row["勤務地"] || "").trim(), workplace, (row["キャンペーン名"] || "").trim()]
+    .filter(Boolean).join(" ・ ");
+  return {
+    jobId: "kb:" + String(id).trim(),
+    branch: kbBranch(workplace, fallbackBranch),
+    title: (row["求人タイトル"] || "").trim(),
+    memo,
+    /* 求人ボックスのCSVに顧客企業名は含まれないため、企業名は詳細画面で手入力する */
+    company: "",
+    employmentType: (row["雇用形態"] || "").trim(),
+    status,
+    stats,
+  };
 }
 function nextReminder(today = new Date()) {
   const day = today.getDate();
@@ -188,6 +320,18 @@ function nextReminder(today = new Date()) {
     }
   }
   return { isToday, daysUntil };
+}
+
+/* 2つの取り込み時点のあいだに増えたクリック数。
+   エアワークは掲載開始からの累計なので単純な差分でよいが、求人ボックスは
+   「集計期間の合計」なので、期間の起点が変わった取り込み同士では差分を取らず、
+   その期間の値をそのまま増分として扱う。 */
+function clicksDelta(job, fromD, toD) {
+  const a = job.snapshots[fromD], b = job.snapshots[toD];
+  if (!b) return 0;
+  if (!a) return b.clicks;
+  const sameWindow = (a.periodStart || null) === (b.periodStart || null);
+  return sameWindow ? Math.max(b.clicks - a.clicks, 0) : b.clicks;
 }
 
 function deriveJobMetrics(job, today = new Date()) {
@@ -210,17 +354,15 @@ function deriveJobMetrics(job, today = new Date()) {
 
     if (postDatesAll.length) {
       const postLatestDate = postDatesAll[postDatesAll.length - 1];
-      const postLatestClicks = job.snapshots[postLatestDate].clicks;
-      const baseClicks = baselineDate ? job.snapshots[baselineDate].clicks : job.snapshots[postDatesAll[0]].clicks;
       const baseDateForAvg = baselineDate || postDatesAll[0];
-      const deltaClicks = Math.max(postLatestClicks - baseClicks, 0);
+      const deltaClicks = clicksDelta(job, baseDateForAvg, postLatestDate);
       const deltaDays = Math.max(daysBetween(toDate(postLatestDate), toDate(baseDateForAvg)), 1);
       postAvgClicksPerDay = deltaClicks / deltaDays;
       clicksPerDaySinceRevision = elapsedDays > 0 ? deltaClicks / elapsedDays : postAvgClicksPerDay;
     }
     if (baselineDate && preDatesAll.length >= 2) {
       const prevDate = preDatesAll[preDatesAll.length - 2];
-      const deltaClicks = Math.max(job.snapshots[baselineDate].clicks - job.snapshots[prevDate].clicks, 0);
+      const deltaClicks = clicksDelta(job, prevDate, baselineDate);
       const deltaDays = Math.max(daysBetween(toDate(baselineDate), toDate(prevDate)), 1);
       preAvgClicksPerDay = deltaClicks / deltaDays;
     }
@@ -252,8 +394,8 @@ async function loadAllJobs() {
   });
   return jobs;
 }
-async function saveJob(job) {
-  const payload = {
+function jobPayload(job) {
+  return {
     job_id: job.jobId,
     branch: job.branch,
     title: job.title,
@@ -266,11 +408,22 @@ async function saveJob(job) {
     snapshots: job.snapshots || {},
     updated_at: new Date().toISOString(),
   };
-  await sbFetch("jobs", {
-    method: "POST",
-    headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify([payload]),
-  });
+}
+async function saveJob(job) {
+  await saveJobs([job]);
+}
+/* 求人ボックスのCSVは数千行あるため、1件ずつではなくまとめて送る */
+async function saveJobs(jobList) {
+  const CHUNK = 500;
+  for (let i = 0; i < jobList.length; i += CHUNK) {
+    const payload = jobList.slice(i, i + CHUNK).filter(Boolean).map(jobPayload);
+    if (!payload.length) continue;
+    await sbFetch("jobs", {
+      method: "POST",
+      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(payload),
+    });
+  }
 }
 async function deleteJobStorage(jobId) {
   await sbFetch(`jobs?job_id=eq.${encodeURIComponent(jobId)}`, {
@@ -291,11 +444,16 @@ function JobAdDashboard() {
   const [toast, setToast] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [lastImport, setLastImport] = useState({});
+  const [activeSource, setActiveSource] = useState("airwork");
   const [activeTab, setActiveTab] = useState("all");
   const [searchText, setSearchText] = useState("");
   const [sortMode, setSortMode] = useState("priority");
   const fileInputs = useRef({});
   const backupInputRef = useRef(null);
+  /* 取り込み中に最新のjobsを同期的に読むための控え */
+  const jobsRef = useRef({});
+
+  useEffect(() => { jobsRef.current = jobs; }, [jobs]);
 
   useEffect(() => {
     (async () => {
@@ -317,79 +475,95 @@ function JobAdDashboard() {
 
   const reminder = useMemo(() => nextReminder(), []);
 
-  const handleFiles = useCallback(async (branchId, fileList) => {
+  const handleFiles = useCallback(async (sourceId, branchId, fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    setBusyBranch(branchId);
+    setBusyBranch(`${sourceId}:${branchId}`);
 
-    let totalRows = 0, newJobs = 0, revisedJobs = 0;
+    let totalRows = 0, newJobs = 0, revisedJobs = 0, skippedRows = 0;
+    const branchCounts = {};
+    const mismatched = [];
 
     for (const file of files) {
-      const snapshotDate = extractSnapshotDate(file.name);
+      const period = extractPeriod(file.name);
+      const snapshotDate = period.date;
       try {
-        const rows = await new Promise((resolve, reject) => {
-          Papa.parse(file, { header: true, skipEmptyLines: true, complete: (res) => resolve(res.data), error: reject });
+        const text = await readCsvText(file);
+        const rows = Papa.parse(text, { header: true, skipEmptyLines: true }).data;
+        /* ボタンを押し間違えても列名から媒体を判定して正しく取り込む */
+        const fileSource = detectSource(rows[0]) || sourceId;
+        if (fileSource !== sourceId) mismatched.push(SOURCE_BY_ID[fileSource].label);
+        const fallbackBranch = resolveBranch(fileSource, branchId);
+
+        const records = [];
+        rows.forEach((row) => {
+          const rec = fileSource === "kyujinbox"
+            ? parseKyujinboxRow(row, fallbackBranch)
+            : parseAirworkRow(row, fallbackBranch);
+          if (rec === "skip") { skippedRows += 1; return; }
+          if (rec) records.push(rec);
         });
-        const validRows = rows.filter((r) => r["求人番号"] && r["求人番号"] !== "合計");
-        totalRows += validRows.length;
+        totalRows += records.length;
 
-        setJobs((prev) => {
-          const next = { ...prev };
-          validRows.forEach((row) => {
-            const jobId = String(row["求人番号"]).trim();
-            const title = (row["求人内容"] || "").trim();
-            const memo = (row["求人メモ"] || "").trim();
-            const employmentType = (row["雇用形態"] || "").trim();
-            const stats = {};
-            Object.entries(COL_MAP).forEach(([jp, key]) => { stats[key] = cleanNum(row[jp]); });
+        const next = { ...jobsRef.current };
+        const touched = [];
+        records.forEach((rec) => {
+          const { jobId, title, memo, branch, employmentType } = rec;
+          const stats = period.start ? { ...rec.stats, periodStart: period.start } : rec.stats;
+          if (rec.status) stats.status = rec.status;
+          const existing = next[jobId];
+          branchCounts[branch] = (branchCounts[branch] || 0) + 1;
 
-            const existing = next[jobId];
-            const autoCompany = extractCompany(memo);
-
-            if (!existing) {
-              newJobs += 1;
-              next[jobId] = {
-                jobId, branch: branchId, title, memo, company: autoCompany, companyManual: false,
-                employmentType, revisions: [], titleHistory: [{ date: snapshotDate, title }],
-                snapshots: { [snapshotDate]: stats },
-                createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-              };
-            } else {
-              const revisions = new Set(existing.revisions || []);
-              let titleHistory = existing.titleHistory || [{ date: existing.createdAt?.slice(0, 10) || snapshotDate, title: existing.title }];
-              if (existing.title && title && existing.title !== title) {
-                revisions.add(snapshotDate);
-                titleHistory = [...titleHistory, { date: snapshotDate, title }];
-                revisedJobs += 1;
-              }
-              next[jobId] = {
-                ...existing, branch: branchId, title, memo,
-                company: existing.companyManual ? existing.company : (autoCompany || existing.company),
-                employmentType, revisions: Array.from(revisions).sort(), titleHistory,
-                snapshots: { ...existing.snapshots, [snapshotDate]: stats },
-                updatedAt: new Date().toISOString(),
-              };
+          if (!existing) {
+            newJobs += 1;
+            next[jobId] = {
+              jobId, branch, title, memo, company: rec.company, companyManual: false,
+              employmentType, revisions: [], titleHistory: [{ date: snapshotDate, title }],
+              snapshots: { [snapshotDate]: stats },
+              createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+            };
+          } else {
+            const revisions = new Set(existing.revisions || []);
+            let titleHistory = existing.titleHistory || [{ date: existing.createdAt?.slice(0, 10) || snapshotDate, title: existing.title }];
+            if (existing.title && title && existing.title !== title) {
+              revisions.add(snapshotDate);
+              titleHistory = [...titleHistory, { date: snapshotDate, title }];
+              revisedJobs += 1;
             }
-          });
-          validRows.forEach((row) => {
-            const jobId = String(row["求人番号"]).trim();
-            saveJob(next[jobId]).catch(() => {});
-          });
-          return next;
+            next[jobId] = {
+              ...existing, branch, title, memo,
+              company: existing.companyManual ? existing.company : (rec.company || existing.company),
+              employmentType, revisions: Array.from(revisions).sort(), titleHistory,
+              snapshots: { ...existing.snapshots, [snapshotDate]: stats },
+              updatedAt: new Date().toISOString(),
+            };
+          }
+          touched.push(next[jobId]);
         });
+
+        jobsRef.current = next;
+        setJobs(next);
+        await saveJobs(touched);
       } catch (e) {
         showToast(`${file.name} の読み込みに失敗しました`, "error");
       }
     }
 
     setBusyBranch(null);
-    setLastImport((prev) => ({ ...prev, [branchId]: { date: todayStr(), count: totalRows } }));
+    setLastImport((prev) => ({ ...prev, [`${sourceId}:${branchId}`]: { date: todayStr(), count: totalRows } }));
     if (totalRows) {
-      let msg = `${totalRows}件の求人データを取り込みました`;
-      if (newJobs) msg += `(新規${newJobs}件`;
-      if (revisedJobs) msg += `${newJobs ? "・" : "("}修正検知${revisedJobs}件`;
-      if (newJobs || revisedJobs) msg += ")";
+      const label = mismatched.length ? mismatched[0] : SOURCE_BY_ID[sourceId].label;
+      let msg = `${label}として${totalRows}件の求人データを取り込みました`;
+      const detail = [];
+      if (newJobs) detail.push(`新規${newJobs}件`);
+      if (revisedJobs) detail.push(`修正検知${revisedJobs}件`);
+      if (skippedRows) detail.push(`募集停止${skippedRows}件は対象外`);
+      const branchDetail = Object.entries(branchCounts).map(([b, c]) => `${b} ${c}件`).join(" / ");
+      if (branchDetail) detail.push(branchDetail);
+      if (detail.length) msg += `(${detail.join("・")})`;
       showToast(msg);
+    } else if (skippedRows) {
+      showToast(`取り込める求人がありませんでした(募集停止${skippedRows}件は対象外)`, "error");
     }
   }, []);
 
@@ -467,7 +641,8 @@ function JobAdDashboard() {
   }
 
   const ranked = useMemo(() => {
-    let source = activeTab === "all" ? Object.values(jobs) : Object.values(jobs).filter((j) => j.branch === activeTab);
+    let source = Object.values(jobs).filter((j) => sourceOf(j.jobId) === activeSource);
+    if (activeTab !== "all") source = source.filter((j) => j.branch === activeTab);
     const q = searchText.trim().toLowerCase();
     if (q) {
       source = source.filter((j) => (j.company || "").toLowerCase().includes(q) || (j.title || "").toLowerCase().includes(q));
@@ -486,13 +661,28 @@ function JobAdDashboard() {
       });
     }
     return list;
-  }, [jobs, activeTab, searchText, sortMode]);
+  }, [jobs, activeSource, activeTab, searchText, sortMode]);
 
-  const tabCounts = useMemo(() => {
-    const counts = { all: Object.keys(jobs).length };
-    BRANCHES.forEach((b) => { counts[b.id] = Object.values(jobs).filter((j) => j.branch === b.id).length; });
+  /* 媒体ごとの登録件数(媒体タブ用) */
+  const sourceCounts = useMemo(() => {
+    const counts = {};
+    SOURCES.forEach((s) => { counts[s.id] = 0; });
+    Object.values(jobs).forEach((j) => { counts[sourceOf(j.jobId)] = (counts[sourceOf(j.jobId)] || 0) + 1; });
     return counts;
   }, [jobs]);
+
+  /* 表示中の媒体における拠点ごとの件数(拠点タブ用) */
+  const tabCounts = useMemo(() => {
+    const inSource = Object.values(jobs).filter((j) => sourceOf(j.jobId) === activeSource);
+    const counts = { all: inSource.length };
+    branchesOf(activeSource).forEach((b) => { counts[b.id] = inSource.filter((j) => j.branch === b.id).length; });
+    return counts;
+  }, [jobs, activeSource]);
+
+  function switchSource(sourceId) {
+    setActiveSource(sourceId);
+    setActiveTab("all");
+  }
 
   const selected = selectedJobId ? jobs[selectedJobId] : null;
   const selectedMetrics = selected ? deriveJobMetrics(selected) : null;
@@ -517,27 +707,45 @@ function JobAdDashboard() {
         </div>
       </header>
 
-      <section className="jad-import-row">
-        {BRANCHES.map((b) => (
-          <div key={b.id} className="jad-branch-card">
-            <div className="jad-branch-name">{b.label}</div>
-            <button className="jad-import-btn" disabled={busyBranch === b.id} onClick={() => fileInputs.current[b.id]?.click()}>
-              {busyBranch === b.id ? <Loader2 size={16} className="jad-spin" /> : <Upload size={16} />}
-              CSVを取り込む
-            </button>
-            <input ref={(el) => (fileInputs.current[b.id] = el)} type="file" accept=".csv" multiple style={{ display: "none" }}
-                   onChange={(e) => { handleFiles(b.id, e.target.files); e.target.value = ""; }} />
-            <div className="jad-branch-count">
-              登録求人数: {Object.values(jobs).filter((j) => j.branch === b.id).length}件
-              {lastImport[b.id] && <span> ・最終取込 {lastImport[b.id].date}</span>}
-            </div>
-          </div>
+      <div className="jad-source-tabs">
+        {SOURCES.map((s) => (
+          <button key={s.id} className={"jad-source-tab " + (activeSource === s.id ? "is-active" : "")} onClick={() => switchSource(s.id)}>
+            {s.label}<span className="jad-tab-count">{sourceCounts[s.id] || 0}</span>
+          </button>
         ))}
+      </div>
+
+      <section className="jad-import-row">
+        {branchesOf(activeSource).map((b) => {
+          const key = `${activeSource}:${b.id}`;
+          return (
+            <div key={key} className="jad-branch-card">
+              <div className="jad-branch-name">{b.label}</div>
+              <button className="jad-import-btn" disabled={busyBranch === key} onClick={() => fileInputs.current[key]?.click()}>
+                {busyBranch === key ? <Loader2 size={16} className="jad-spin" /> : <Upload size={16} />}
+                CSVを取り込む
+              </button>
+              <input ref={(el) => (fileInputs.current[key] = el)} type="file" accept=".csv" multiple style={{ display: "none" }}
+                     onChange={(e) => { handleFiles(activeSource, b.id, e.target.files); e.target.value = ""; }} />
+              <div className="jad-branch-count">
+                登録求人数: {Object.values(jobs).filter((j) => sourceOf(j.jobId) === activeSource && j.branch === b.id).length}件
+                {lastImport[key] && <span> ・最終取込 {lastImport[key].date}</span>}
+              </div>
+            </div>
+          );
+        })}
       </section>
+
+      {activeSource === "kyujinbox" && (
+        <p className="jad-source-note">
+          求人BOXのCSVは plus / next / up が1ファイルにまとまっているため、「勤務先名」から拠点を自動で振り分けます
+          (判定できない行だけ、押したボタンの拠点に入ります)。ステータスが「募集停止」の求人は取り込みません。
+        </p>
+      )}
 
       <div className="jad-tabs">
         <button className={"jad-tab " + (activeTab === "all" ? "is-active" : "")} onClick={() => setActiveTab("all")}>全体<span className="jad-tab-count">{tabCounts.all}</span></button>
-        {BRANCHES.map((b) => (
+        {branchesOf(activeSource).map((b) => (
           <button key={b.id} className={"jad-tab " + (activeTab === b.id ? "is-active" : "")} onClick={() => setActiveTab(b.id)}>{b.label}<span className="jad-tab-count">{tabCounts[b.id]}</span></button>
         ))}
       </div>
@@ -554,7 +762,11 @@ function JobAdDashboard() {
         <div className="jad-empty"><Loader2 size={20} className="jad-spin" /> 読み込み中…</div>
       ) : ranked.length === 0 ? (
         <div className="jad-empty">
-          {searchText.trim() ? `「${searchText}」に一致する求人が見つかりません。` : activeTab === "all" ? "まだ求人データがありません。上のボタンから各拠点の「求人ごとの配信実績」CSVを取り込んでください。" : `${BRANCHES.find((b) => b.id === activeTab)?.label} の求人データがまだありません。`}
+          {searchText.trim()
+            ? `「${searchText}」に一致する求人が見つかりません。`
+            : activeTab === "all"
+              ? `まだ${SOURCE_BY_ID[activeSource].label}のデータがありません。上のボタンから各拠点の${SOURCE_BY_ID[activeSource].fileHint}を取り込んでください。`
+              : `${branchesOf(activeSource).find((b) => b.id === activeTab)?.label} の求人データがまだありません。`}
         </div>
       ) : (
         <section className="jad-table-wrap">
@@ -580,7 +792,7 @@ function JobAdDashboard() {
                   {activeTab === "all" && <td className="c-branch">{job.branch}</td>}
                   <td className="c-name">
                     <div className="jad-job-name">{job.title}</div>
-                    <div className="jad-job-sub">{job.company || "(企業名未判定)"} ・ ID:{job.jobId}</div>
+                    <div className="jad-job-sub">{job.company || "(企業名未判定)"} ・ ID:{displayJobId(job.jobId)}</div>
                   </td>
                   <td className="c-num">{m.latest ? fmtInt(m.latest.applies) : "—"}</td>
                   <td className="c-num">{m.latest ? fmtPct(m.latest.ctr) : "—"}</td>
@@ -637,6 +849,7 @@ function DetailPanel({ job, metrics, onClose, onAddRevision, onRemoveRevision, o
   const [company, setCompany] = useState(job.company);
   const [branch, setBranch] = useState(job.branch);
   const [confirmDel, setConfirmDel] = useState(false);
+  const jobSource = sourceOf(job.jobId);
 
   const chartData = metrics.snapDates.map((d) => ({ date: d, クリック数: job.snapshots[d].clicks, 応募数: job.snapshots[d].applies }));
 
@@ -656,7 +869,7 @@ function DetailPanel({ job, metrics, onClose, onAddRevision, onRemoveRevision, o
         {!editing ? (
           <div className="jad-panel-title-row">
             <div>
-              <div className="jad-panel-eyebrow">{branch} ・ 求人番号 {job.jobId} ・ {job.employmentType}</div>
+              <div className="jad-panel-eyebrow">{SOURCE_BY_ID[jobSource].label} ・ {branch} ・ 求人番号 {displayJobId(job.jobId)} ・ {job.employmentType}</div>
               <h2>{job.title}</h2>
               <div className="jad-panel-company"><Building2 size={13}/> {company || "(企業名未判定)"}</div>
             </div>
@@ -666,10 +879,10 @@ function DetailPanel({ job, metrics, onClose, onAddRevision, onRemoveRevision, o
           <div className="jad-edit-form">
             <label>拠点
               <select value={branch} onChange={(e) => setBranch(e.target.value)}>
-                {BRANCHES.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
+                {branchesOf(jobSource).map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
               </select>
             </label>
-            <label>企業名(求人メモから自動判定・修正可)
+            <label>{jobSource === "kyujinbox" ? "企業名(求人BOXのCSVには含まれないため手入力)" : "企業名(求人メモから自動判定・修正可)"}
               <input value={company} onChange={(e) => setCompany(e.target.value)} />
             </label>
             <div className="jad-edit-actions">
@@ -679,10 +892,10 @@ function DetailPanel({ job, metrics, onClose, onAddRevision, onRemoveRevision, o
           </div>
         )}
 
-        <div className="jad-memo-block"><FileText size={13} /> <span>{job.memo || "(求人メモなし)"}</span></div>
+        <div className="jad-memo-block"><FileText size={13} /> <span>{job.memo || (jobSource === "kyujinbox" ? "(勤務地情報なし)" : "(求人メモなし)")}</span></div>
 
         <div className="jad-metric-grid">
-          <Metric label="累計応募数(最新)" value={metrics.latest ? fmtInt(metrics.latest.applies) : "—"} />
+          <Metric label={jobSource === "kyujinbox" ? "応募数(集計期間の合計)" : "累計応募数(最新)"} value={metrics.latest ? fmtInt(metrics.latest.applies) : "—"} />
           <Metric label="クリック率(最新)" value={metrics.latest ? fmtPct(metrics.latest.ctr) : "—"} />
           <Metric label="直近修正日" value={metrics.lastRevision || "—"} />
           <Metric label="修正からの経過日数" value={metrics.elapsedDays !== null ? metrics.elapsedDays + "日" : "—"} />
@@ -693,7 +906,7 @@ function DetailPanel({ job, metrics, onClose, onAddRevision, onRemoveRevision, o
         </div>
 
         <div className="jad-chart-block">
-          <h3>取り込みごとの累計推移(クリック数 / 応募数)</h3>
+          <h3>{jobSource === "kyujinbox" ? "取り込みごとの推移(クリック数 / 応募数・集計期間の合計)" : "取り込みごとの累計推移(クリック数 / 応募数)"}</h3>
           {chartData.length > 1 ? (
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={chartData} margin={{ top: 8, right: 16, left: -12, bottom: 0 }}>
@@ -792,6 +1005,12 @@ body { font-family: 'Noto Sans JP', sans-serif; color: var(--jad-ink); }
 .jad-import-btn:disabled { opacity: 0.6; cursor: default; }
 .jad-branch-count { font-size: 11px; color: var(--jad-ink-soft); }
 
+.jad-source-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.jad-source-tab { display: inline-flex; align-items: center; gap: 6px; background: var(--jad-surface); border: 1px solid var(--jad-border); border-radius: 999px; padding: 7px 16px; font-size: 13px; font-weight: 500; color: var(--jad-ink-soft); cursor: pointer; font-family: 'Roboto Mono', monospace; }
+.jad-source-tab:hover { color: var(--jad-navy); border-color: var(--jad-navy); }
+.jad-source-tab.is-active { background: var(--jad-navy); border-color: var(--jad-navy); color: #fff; font-weight: 700; }
+.jad-source-tab.is-active .jad-tab-count { background: rgba(255,255,255,0.22); color: #fff; }
+.jad-source-note { margin: -8px 0 16px; font-size: 11.5px; line-height: 1.7; color: var(--jad-ink-soft); background: var(--jad-navy-soft); border-radius: 6px; padding: 9px 12px; }
 .jad-tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--jad-border); }
 .jad-tab { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; border-bottom: 2px solid transparent; padding: 9px 14px; font-size: 13px; font-weight: 500; color: var(--jad-ink-soft); cursor: pointer; font-family: 'Roboto Mono', monospace; }
 .jad-tab:hover { color: var(--jad-navy); }
