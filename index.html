@@ -448,6 +448,7 @@ function JobAdDashboard() {
   const [activeTab, setActiveTab] = useState("all");
   const [searchText, setSearchText] = useState("");
   const [sortMode, setSortMode] = useState("priority");
+  const [impFilter, setImpFilter] = useState("all");
   const fileInputs = useRef({});
   const backupInputRef = useRef(null);
   /* 取り込み中に最新のjobsを同期的に読むための控え */
@@ -647,21 +648,31 @@ function JobAdDashboard() {
     if (q) {
       source = source.filter((j) => (j.company || "").toLowerCase().includes(q) || (j.title || "").toLowerCase().includes(q));
     }
-    const list = source.map((job) => ({ job, m: deriveJobMetrics(job) }));
+    let list = source.map((job) => ({ job, m: deriveJobMetrics(job) }));
+    if (impFilter !== "all") {
+      list = list.filter(({ m }) => {
+        const imp = m.latest ? m.latest.impressions : 0;
+        return impFilter === "shown" ? imp > 0 : imp === 0;
+      });
+    }
     if (sortMode === "company") {
       list.sort((a, b) => (a.job.company || "").localeCompare(b.job.company || "", "ja"));
     } else {
       list.sort((a, b) => {
+        const aImp = a.m.latest ? a.m.latest.impressions : 0;
+        const bImp = b.m.latest ? b.m.latest.impressions : 0;
+        if ((aImp === 0) !== (bImp === 0)) return aImp === 0 ? 1 : -1;
         const aApplies = a.m.latest ? a.m.latest.applies : 0;
         const bApplies = b.m.latest ? b.m.latest.applies : 0;
         if (aApplies !== bApplies) return aApplies - bApplies;
         const aCtr = a.m.latest ? a.m.latest.ctr : 0;
         const bCtr = b.m.latest ? b.m.latest.ctr : 0;
-        return aCtr - bCtr;
+        if (aCtr !== bCtr) return aCtr - bCtr;
+        return bImp - aImp;
       });
     }
     return list;
-  }, [jobs, activeSource, activeTab, searchText, sortMode]);
+  }, [jobs, activeSource, activeTab, searchText, sortMode, impFilter]);
 
   /* 媒体ごとの登録件数(媒体タブ用) */
   const sourceCounts = useMemo(() => {
@@ -756,6 +767,11 @@ function JobAdDashboard() {
           <button className={sortMode === "priority" ? "is-active" : ""} onClick={() => setSortMode("priority")}>優先度順</button>
           <button className={sortMode === "company" ? "is-active" : ""} onClick={() => setSortMode("company")}>企業名順</button>
         </div>
+        <div className="jad-sort-toggle">
+          <button className={impFilter === "all" ? "is-active" : ""} onClick={() => setImpFilter("all")}>すべて</button>
+          <button className={impFilter === "shown" ? "is-active" : ""} onClick={() => setImpFilter("shown")}>表示あり</button>
+          <button className={impFilter === "zero" ? "is-active" : ""} onClick={() => setImpFilter("zero")}>表示0</button>
+        </div>
       </div>
 
       {loading ? (
@@ -776,6 +792,7 @@ function JobAdDashboard() {
                 <th className="c-rank">{sortMode === "priority" ? "優先度" : "#"}</th>
                 {activeTab === "all" && <th className="c-branch">拠点</th>}
                 <th className="c-name">求人 / 企業</th>
+                <th className="c-num">表示数</th>
                 <th className="c-num">応募数</th>
                 <th className="c-num">クリック率</th>
                 <th className="c-date">直近修正日</th>
@@ -794,6 +811,7 @@ function JobAdDashboard() {
                     <div className="jad-job-name">{job.title}</div>
                     <div className="jad-job-sub">{job.company || "(企業名未判定)"} ・ ID:{displayJobId(job.jobId)}</div>
                   </td>
+                  <td className="c-num">{m.latest ? fmtInt(m.latest.impressions) : "—"}</td>
                   <td className="c-num">{m.latest ? fmtInt(m.latest.applies) : "—"}</td>
                   <td className="c-num">{m.latest ? fmtPct(m.latest.ctr) : "—"}</td>
                   <td className="c-date">{m.lastRevision || "—"}</td>
