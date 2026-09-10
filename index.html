@@ -932,6 +932,10 @@ function JobAdDashboard() {
           <table className="jad-table">
             <thead>
               <tr>
+                <th className="c-check" title="表示中の求人をすべて選択 / 解除">
+                  <input type="checkbox" checked={allVisibleSelected}
+                         onChange={toggleSelectAllVisible} />
+                </th>
                 <th className="c-rank">{sortMode === "priority" ? "優先度" : "#"}</th>
                 {activeTab === "all" && <th className="c-branch">拠点</th>}
                 <th className="c-name">求人 / 企業</th>
@@ -943,15 +947,16 @@ function JobAdDashboard() {
                 <th className="c-num">修正後<br/>クリック/日</th>
                 <th className="c-num">修正前後<br/>変化</th>
                 <th className="c-detail"></th>
-                <th className="c-check" title="表示中の求人をすべて選択 / 解除">
-                  <input type="checkbox" checked={allVisibleSelected}
-                         onChange={toggleSelectAllVisible} />
-                </th>
               </tr>
             </thead>
             <tbody>
               {ranked.map(({ job, m }, idx) => (
                 <tr key={job.jobId} className={sortMode === "priority" && idx < 3 ? "is-priority" : ""} onClick={() => setSelectedJobId(job.jobId)}>
+                  {/* 行クリックは詳細を開くので、チェックボックスまで伝播させない */}
+                  <td className="c-check" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={selectedIds.has(job.jobId)}
+                           onChange={() => toggleSelect(job.jobId)} />
+                  </td>
                   <td className="c-rank"><span className={"jad-rank-badge " + (sortMode === "priority" ? (idx < 3 ? "danger" : idx < 8 ? "warn" : "ok") : "ok")}>{idx + 1}</span></td>
                   {activeTab === "all" && <td className="c-branch">{job.branch}</td>}
                   <td className="c-name">
@@ -972,11 +977,6 @@ function JobAdDashboard() {
                     )}
                   </td>
                   <td className="c-detail"><ChevronRight size={16} /></td>
-                  {/* 行クリックは詳細を開くので、チェックボックスまで伝播させない */}
-                  <td className="c-check" onClick={(e) => e.stopPropagation()}>
-                    <input type="checkbox" checked={selectedIds.has(job.jobId)}
-                           onChange={() => toggleSelect(job.jobId)} />
-                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1219,7 +1219,7 @@ body { font-family: 'Noto Sans JP', sans-serif; color: var(--jad-ink); }
 .jad-change.up { color: var(--jad-good); }
 .jad-change.down { color: var(--jad-brick); }
 .c-detail { color: var(--jad-ink-soft); }
-.c-check { width: 42px; text-align: center; padding-right: 12px !important; }
+.c-check { width: 38px; text-align: center; padding-left: 12px !important; padding-right: 0 !important; }
 .c-check input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--jad-navy); cursor: pointer; vertical-align: middle; }
 .jad-bulk-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 14px; background: var(--jad-navy-soft); border: 1px solid var(--jad-navy); border-radius: 8px; }
 .jad-bulk-count { font-family: 'Roboto Mono', monospace; font-size: 12.5px; font-weight: 700; color: var(--jad-navy); }
