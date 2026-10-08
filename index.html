@@ -928,12 +928,12 @@ function JobAdDashboard() {
                   登録求人数: {branchIds.length}件
                   {lastImport[key] && <span> ・最終取込 {lastImport[key].date}</span>}
                 </span>
-                {branchIds.length > 0 && (
-                  <button className="jad-card-del" disabled={!!loadError}
-                          onClick={() => askDelete(`${b.label} の登録求人 ${branchIds.length}件`, branchIds)}>
-                    全件削除
-                  </button>
-                )}
+                {/* 0件でもボタンは置く。拠点ごとにカードの見た目が変わらないようにするため */}
+                <button className="jad-card-del" disabled={!!loadError || branchIds.length === 0}
+                        title={branchIds.length === 0 ? "削除する求人がありません" : ""}
+                        onClick={() => askDelete(`${b.label} の登録求人 ${branchIds.length}件`, branchIds)}>
+                  全件削除
+                </button>
               </div>
             </div>
           );
