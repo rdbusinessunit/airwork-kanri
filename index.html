@@ -519,6 +519,8 @@ function JobAdDashboard() {
   const [searchText, setSearchText] = useState("");
   const [sortMode, setSortMode] = useState("priority");
   const [impFilter, setImpFilter] = useState("all");
+  /* 最新の取り込みに載っているかどうかの絞り込み(古い求人の掃除用) */
+  const [freshFilter, setFreshFilter] = useState("all");
   /* 一括で修正日を登録するための選択状態(求人番号の集合) */
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkDate, setBulkDate] = useState(todayStr());
@@ -786,12 +788,35 @@ function JobAdDashboard() {
     reader.readAsText(file);
   }
 
+  /* 拠点ごとの「いちばん新しい取り込み日」。
+     拠点によって取り込む日が違うので、古いかどうかは拠点の中で比べる。 */
+  const latestByBranch = useMemo(() => {
+    const out = {};
+    Object.values(jobs).forEach((j) => {
+      const d = Object.keys(j.snapshots || {}).sort().pop();
+      if (!d) return;
+      const k = `${sourceOf(j.jobId)}:${j.branch}`;
+      if (!out[k] || d > out[k]) out[k] = d;
+    });
+    return out;
+  }, [jobs]);
+  const lastImportOf = (job) => Object.keys(job.snapshots || {}).sort().pop() || "";
+  /* その拠点の最新の取り込みに載っていない＝掲載が終わった可能性がある求人 */
+  const isStale = (job) => {
+    const d = lastImportOf(job);
+    const latest = latestByBranch[`${sourceOf(job.jobId)}:${job.branch}`];
+    return !!(d && latest && d < latest);
+  };
+
   const ranked = useMemo(() => {
     let source = Object.values(jobs).filter((j) => sourceOf(j.jobId) === activeSource);
     if (activeTab !== "all") source = source.filter((j) => j.branch === activeTab);
     const q = searchText.trim().toLowerCase();
     if (q) {
       source = source.filter((j) => (j.company || "").toLowerCase().includes(q) || (j.title || "").toLowerCase().includes(q));
+    }
+    if (freshFilter !== "all") {
+      source = source.filter((j) => (freshFilter === "stale" ? isStale(j) : !isStale(j)));
     }
     let list = source.map((job) => ({ job, m: deriveJobMetrics(job) }));
     if (impFilter !== "all") {
@@ -817,7 +842,7 @@ function JobAdDashboard() {
       });
     }
     return list;
-  }, [jobs, activeSource, activeTab, searchText, sortMode, impFilter]);
+  }, [jobs, activeSource, activeTab, searchText, sortMode, impFilter, freshFilter, latestByBranch]);
 
   /* 媒体ごとの登録件数(媒体タブ用) */
   const sourceCounts = useMemo(() => {
@@ -940,7 +965,21 @@ function JobAdDashboard() {
           <button className={impFilter === "shown" ? "is-active" : ""} onClick={() => setImpFilter("shown")}>表示あり</button>
           <button className={impFilter === "zero" ? "is-active" : ""} onClick={() => setImpFilter("zero")}>表示0</button>
         </div>
+        <select className="jad-filter-select" value={freshFilter} onChange={(e) => setFreshFilter(e.target.value)}
+                title="その拠点のいちばん新しい取り込みに載っていたかどうかで絞り込みます">
+          <option value="all">取込：すべて</option>
+          <option value="fresh">取込：最新に載っている</option>
+          <option value="stale">取込：最新に載っていない</option>
+        </select>
       </div>
+
+      {freshFilter === "stale" && (
+        <p className="jad-source-note">
+          その拠点のいちばん新しい取り込みに載っていなかった求人です。掲載が終わっている可能性がありますが、
+          <b>別の広告（キャンペーン）のCSVを取り込んだだけでもここに入ります</b>。消す前に中身を確認してください。
+          見出し行のチェックボックスで表示中を全選択できます。
+        </p>
+      )}
 
       {selectedIds.size > 0 && (
         <div className="jad-bulk-bar">
@@ -994,6 +1033,7 @@ function JobAdDashboard() {
                 <th className="c-num">表示数</th>
                 <th className="c-num">応募数</th>
                 <th className="c-num">クリック率</th>
+                <th className="c-date">最終取込</th>
                 <th className="c-date">直近修正日</th>
                 <th className="c-num">経過日数</th>
                 <th className="c-num">修正後<br/>クリック/日</th>
@@ -1018,6 +1058,10 @@ function JobAdDashboard() {
                   <td className="c-num">{m.latest ? fmtInt(m.latest.impressions) : "—"}</td>
                   <td className="c-num">{m.latest ? fmtInt(m.latest.applies) : "—"}</td>
                   <td className="c-num">{m.latest ? fmtPct(m.latest.ctr) : "—"}</td>
+                  <td className={"c-date" + (isStale(job) ? " is-stale" : "")}>
+                    {lastImportOf(job) || "—"}
+                    {isStale(job) && <span className="jad-stale-tag">最新に無し</span>}
+                  </td>
                   <td className="c-date">{m.lastRevision || "—"}</td>
                   <td className="c-num">{m.elapsedDays !== null ? m.elapsedDays + "日" : "—"}</td>
                   <td className="c-num">{m.clicksPerDaySinceRevision !== null ? m.clicksPerDaySinceRevision.toFixed(1) : "—"}</td>
@@ -1260,6 +1304,9 @@ body { font-family: 'Noto Sans JP', sans-serif; color: var(--jad-ink); }
 .jad-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .jad-search { flex: 1; min-width: 200px; border: 1px solid var(--jad-border); border-radius: 6px; padding: 8px 12px; font-size: 12.5px; font-family: inherit; background: var(--jad-surface); }
 .jad-search:focus { outline: none; border-color: var(--jad-navy); }
+.jad-filter-select { font-family: 'Roboto Mono', monospace; font-size: 12px; padding: 7px 10px; border: 1px solid var(--jad-border); border-radius: 6px; background: var(--jad-surface); color: var(--jad-ink-soft); cursor: pointer; }
+.c-date.is-stale { color: var(--jad-brick); }
+.jad-stale-tag { display: block; font-size: 9.5px; letter-spacing: .02em; }
 .jad-sort-toggle { display: flex; border: 1px solid var(--jad-border); border-radius: 6px; overflow: hidden; }
 .jad-sort-toggle button { background: var(--jad-surface); border: none; padding: 8px 14px; font-size: 12px; color: var(--jad-ink-soft); cursor: pointer; font-family: 'Roboto Mono', monospace; }
 .jad-sort-toggle button + button { border-left: 1px solid var(--jad-border); }
