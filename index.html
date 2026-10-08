@@ -850,7 +850,8 @@ function JobAdDashboard() {
         ))}
       </div>
 
-      <section className="jad-import-row">
+      {/* 拠点が5つ以上のときは1行4つで折り返す(エアワークは上4つ・下3つ) */}
+      <section className="jad-import-row" style={{ "--jad-import-cols": Math.min(4, branchesOf(activeSource).length) }}>
         {branchesOf(activeSource).map((b) => {
           const key = `${activeSource}:${b.id}`;
           return (
@@ -1171,7 +1172,9 @@ body { font-family: 'Noto Sans JP', sans-serif; color: var(--jad-ink); }
 .jad-reminder { display: flex; align-items: center; gap: 6px; font-size: 12.5px; background: var(--jad-surface); border: 1px solid var(--jad-border); padding: 7px 12px; border-radius: 20px; color: var(--jad-ink-soft); }
 .jad-reminder.is-today { background: #FBF0DD; border-color: var(--jad-gold); color: #8B6118; font-weight: 600; }
 
-.jad-import-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.jad-import-row { display: grid; grid-template-columns: repeat(var(--jad-import-cols, 4), 1fr); gap: 10px; margin-bottom: 20px; }
+@media (max-width: 860px) { .jad-import-row { grid-template-columns: repeat(2, 1fr) !important; } }
+@media (max-width: 520px) { .jad-import-row { grid-template-columns: 1fr !important; } }
 .jad-branch-card { background: var(--jad-surface); border: 1px solid var(--jad-border); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .jad-branch-name { font-family: 'Roboto Mono', monospace; font-weight: 500; font-size: 13px; color: var(--jad-navy); }
 .jad-import-btn { display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--jad-navy); color: #fff; border: none; padding: 8px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; font-weight: 600; }
