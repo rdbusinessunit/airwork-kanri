@@ -486,6 +486,18 @@ async function deleteJobStorage(jobId) {
     headers: { "Prefer": "return=minimal" },
   });
 }
+/* まとめて削除。1件ずつ消すとURL1本につき1件で何千回も往復するため、
+   in.(...) に詰めて送る。URLが長くなりすぎないよう200件ずつに割る。 */
+async function deleteJobsStorage(ids) {
+  const CHUNK = 200;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const list = ids.slice(i, i + CHUNK).map((id) => encodeURIComponent(`"${id}"`)).join(",");
+    await sbFetch(`jobs?job_id=in.(${list})`, {
+      method: "DELETE",
+      headers: { "Prefer": "return=minimal" },
+    });
+  }
+}
 
 /* ==================================================================
    メインコンポーネント
@@ -498,7 +510,9 @@ function JobAdDashboard() {
   const [busyBranch, setBusyBranch] = useState(null);
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [toast, setToast] = useState(null);
-  const [confirmReset, setConfirmReset] = useState(false);
+  /* 削除の確認ダイアログ。{ label, ids } を入れると開く */
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [delBusy, setDelBusy] = useState(false);
   const [lastImport, setLastImport] = useState({});
   const [activeSource, setActiveSource] = useState("airwork");
   const [activeTab, setActiveTab] = useState("all");
@@ -717,12 +731,30 @@ function JobAdDashboard() {
     if (selectedJobId === jobId) setSelectedJobId(null);
     showToast("求人データを削除しました");
   }
-  async function resetAll() {
-    const keys = Object.keys(jobs);
-    for (const id of keys) await deleteJobStorage(id).catch(() => {});
-    setJobs({});
-    setConfirmReset(false);
-    showToast("すべてのデータを削除しました");
+  function askDelete(label, ids) {
+    if (!ids.length) return;
+    setConfirmDel({ label, ids });
+  }
+  /* 先にSupabaseから消してから画面に反映する。
+     途中で失敗したときに、画面だけ消えて実際は残っている状態を作らないため。 */
+  async function runDelete() {
+    const ids = confirmDel.ids;
+    setDelBusy(true);
+    try {
+      await deleteJobsStorage(ids);
+      const next = { ...jobsRef.current };
+      ids.forEach((id) => { delete next[id]; });
+      jobsRef.current = next;
+      setJobs(next);
+      setSelectedIds((prev) => { const n = new Set(prev); ids.forEach((id) => n.delete(id)); return n; });
+      if (ids.includes(selectedJobId)) setSelectedJobId(null);
+      setConfirmDel(null);
+      showToast(`${ids.length}件を削除しました`);
+    } catch (e) {
+      showToast(`削除に失敗しました。${describeError(e)}`, "error");
+    } finally {
+      setDelBusy(false);
+    }
   }
 
   function exportBackup() {
@@ -854,6 +886,9 @@ function JobAdDashboard() {
       <section className="jad-import-row" style={{ "--jad-import-cols": Math.min(4, branchesOf(activeSource).length) }}>
         {branchesOf(activeSource).map((b) => {
           const key = `${activeSource}:${b.id}`;
+          const branchIds = Object.values(jobs)
+            .filter((j) => sourceOf(j.jobId) === activeSource && j.branch === b.id)
+            .map((j) => j.jobId);
           return (
             <div key={key} className="jad-branch-card">
               <div className="jad-branch-name">{b.label}</div>
@@ -864,8 +899,16 @@ function JobAdDashboard() {
               <input ref={(el) => (fileInputs.current[key] = el)} type="file" accept=".csv" multiple style={{ display: "none" }}
                      onChange={(e) => { handleFiles(activeSource, b.id, e.target.files); e.target.value = ""; }} />
               <div className="jad-branch-count">
-                登録求人数: {Object.values(jobs).filter((j) => sourceOf(j.jobId) === activeSource && j.branch === b.id).length}件
-                {lastImport[key] && <span> ・最終取込 {lastImport[key].date}</span>}
+                <span>
+                  登録求人数: {branchIds.length}件
+                  {lastImport[key] && <span> ・最終取込 {lastImport[key].date}</span>}
+                </span>
+                {branchIds.length > 0 && (
+                  <button className="jad-card-del" disabled={!!loadError}
+                          onClick={() => askDelete(`${b.label} の登録求人 ${branchIds.length}件`, branchIds)}>
+                    全件削除
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -905,6 +948,10 @@ function JobAdDashboard() {
           <input type="date" value={bulkDate} onChange={(e) => setBulkDate(e.target.value)} />
           <button className="jad-primary-btn" disabled={bulkBusy || !bulkDate} onClick={() => addRevisionToSelected(bulkDate)}>
             {bulkBusy ? <Loader2 size={14} className="jad-spin" /> : <Check size={14} />} まとめて修正日として登録
+          </button>
+          <button className="jad-ghost-btn danger" disabled={bulkBusy}
+                  onClick={() => askDelete(`選択した求人 ${selectedIds.size}件`, Array.from(selectedIds))}>
+            選択した求人を削除
           </button>
           <button className="jad-ghost-btn" onClick={() => setSelectedIds(new Set())}>選択を解除</button>
           <span className="jad-bulk-note">検索や絞り込みを変えても選択は残ります</span>
@@ -989,9 +1036,11 @@ function JobAdDashboard() {
         </section>
       )}
 
-      {ranked.length > 0 && (
+      {Object.keys(jobs).length > 0 && (
         <div className="jad-footer-row">
-          <button className="jad-ghost-btn" onClick={() => setConfirmReset(true)}><RotateCcw size={14} /> 全データを削除</button>
+          <button className="jad-ghost-btn" onClick={() => askDelete("すべての求人データ（全媒体・全拠点）", Object.keys(jobs))}>
+            <RotateCcw size={14} /> 全データを削除
+          </button>
         </div>
       )}
 
@@ -1001,13 +1050,19 @@ function JobAdDashboard() {
                      onUpdateInfo={updateJobInfo} onDelete={deleteJob} />
       )}
 
-      {confirmReset && (
+      {confirmDel && (
         <div className="jad-overlay">
           <div className="jad-confirm">
-            <p>すべての求人データを削除します。この操作は取り消せません。</p>
+            <p><strong>{confirmDel.label}</strong>を削除します。この操作は取り消せません。</p>
+            <p className="jad-confirm-note">
+              取り込んだ実績だけでなく、記録した修正日・タイトルの変更履歴・手入力した企業名も一緒に消えます。
+              残しておきたい場合は、先にヘッダーの「バックアップ保存」を取ってください。
+            </p>
             <div className="jad-confirm-actions">
-              <button className="jad-ghost-btn" onClick={() => setConfirmReset(false)}>キャンセル</button>
-              <button className="jad-danger-btn" onClick={resetAll}>削除する</button>
+              <button className="jad-ghost-btn" disabled={delBusy} onClick={() => setConfirmDel(null)}>キャンセル</button>
+              <button className="jad-danger-btn" disabled={delBusy} onClick={runDelete}>
+                {delBusy ? <Loader2 size={14} className="jad-spin" /> : null} 削除する
+              </button>
             </div>
           </div>
         </div>
@@ -1180,7 +1235,11 @@ body { font-family: 'Noto Sans JP', sans-serif; color: var(--jad-ink); }
 .jad-import-btn { display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--jad-navy); color: #fff; border: none; padding: 8px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; font-weight: 600; }
 .jad-import-btn:hover { opacity: 0.9; }
 .jad-import-btn:disabled { opacity: 0.6; cursor: default; }
-.jad-branch-count { font-size: 11px; color: var(--jad-ink-soft); }
+.jad-branch-count { font-size: 11px; color: var(--jad-ink-soft); display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.jad-card-del { flex: none; background: none; border: none; padding: 0; font-family: inherit; font-size: 11px; color: var(--jad-ink-soft); text-decoration: underline; cursor: pointer; }
+.jad-card-del:hover:not(:disabled) { color: var(--jad-brick); }
+.jad-card-del:disabled { opacity: .4; cursor: default; }
+.jad-confirm-note { font-size: 11.5px; line-height: 1.8; color: var(--jad-ink-soft); margin-top: 10px; }
 
 .jad-source-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
 .jad-source-tab { display: inline-flex; align-items: center; gap: 6px; background: var(--jad-surface); border: 1px solid var(--jad-border); border-radius: 999px; padding: 7px 16px; font-size: 13px; font-weight: 500; color: var(--jad-ink-soft); cursor: pointer; font-family: 'Roboto Mono', monospace; }
